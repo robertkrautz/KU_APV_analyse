@@ -1,0 +1,443 @@
+---
+title: "20220825_workflow_KUmobning"
+output: html_document
+date: "2022-08-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## [0.0.] Load necessary packages
+```{r message=FALSE}
+base::library(tidyverse)
+base::library(here)
+```
+
+## [1.0.] Read data
+```{r}
+fs <- base::list.files(
+      path = here::here("data"),
+      full.names = TRUE
+    ) %>%
+  stringr::str_subset("csv")
+
+tab <- readr::read_delim(
+    file = fs,
+    delim = ";",
+    skip = 0,
+    col_names = TRUE,
+    col_types = readr::cols(
+      .default = readr::col_double(),
+      institute = readr::col_character(),
+      id = readr::col_character(),
+      source_slide = readr::col_skip(),
+      source = readr::col_skip()
+    ),
+    locale = locale(decimal_mark = ",")
+  )
+```
+
+## [1.1.] Evaluate
+```{r}
+tab %>%
+  tidyr::drop_na() %>%
+  dplyr::group_by(institute,year,id) %>%
+  dplyr::summarise(count = dplyr::n()) %>%
+  dplyr::filter(count > 1L)
+```
+
+## [2.0.] Calculate relative cases
+```{r}
+ys <- base::c("2016","2019","2022")
+tab_wide_ <- tab %>%
+  dplyr::select(-cases_relative) %>%
+  tidyr::pivot_wider(
+      names_from = "id",
+      values_from = "cases_absolute"
+    ) %>%
+  dplyr::mutate(
+      all_cases_rel = 100*all_cases/all_answers,
+      year = base::factor(
+        x = year,
+        levels = ys,
+        ordered = TRUE
+      )
+    )
+```
+
+## [2.1.] Set object levels
+```{r}
+levs <- tab_wide_ %>%
+  dplyr::filter(
+      year == "2022" &
+      institute != "KU"
+    ) %>%
+  dplyr::arrange(
+      dplyr::desc(all_cases_rel)
+    ) %>%
+  dplyr::pull(institute)
+
+tab_wide <- tab_wide_ %>%
+  dplyr::mutate(
+    institute = base::factor(
+      x = institute,
+      levels = base::c("KU",levs),
+      ordered = TRUE
+    )
+  )
+
+std <- tab_wide_ %>%
+  dplyr::filter(
+      year == "2022" &
+      institute == "KU"
+    ) %>%
+  dplyr::pull(all_cases_rel)
+```
+
+## [2.2.] Plot instances
+```{r}
+ggplot2::ggplot(
+      data = tab_wide,
+      mapping = aes(
+        y = year,
+        x = all_cases_rel,
+        fill = year
+      )
+    ) +
+  geom_bar(
+      stat = "identity",
+      colour = "black"
+    ) +
+  geom_text(
+      mapping = aes(
+          label = all_cases
+        ),
+      hjust = -0.25,
+      size = 3
+    ) +
+  geom_vline(
+      xintercept = std,
+      linetype = "dashed"
+    ) +
+  scale_y_discrete(
+      position = "right"
+    ) +
+  scale_x_continuous(
+      limits = base::c(0,16)
+    ) +
+  scale_fill_manual(
+      limits = ys,
+      breaks = ys,
+      values = base::c("white","grey50","black")
+    ) +
+  facet_wrap(
+      facets = . ~ institute,
+      ncol = 1,
+      strip.position = "left"
+    ) +
+  theme_bw() +
+  theme(
+      panel.spacing = grid::unit(0.1,"lines"),
+      aspect.ratio = 1/3,
+      axis.title = element_blank(),
+      legend.position = "none"
+    )
+```
+
+## [2.3.] Print plot
+```{r}
+for(ext in base::c("pdf", "png")){
+    ggplot2::ggsave(
+      filename = base::paste0(
+          here::here("results/"),
+          base::format(base::Sys.time(), "%Y%m%d"),
+          "_allInstancesRatio",
+          ".", ext
+        ),
+      plot = ggplot2::last_plot(),
+      device = ext,
+      dpi = 300,
+      width = 3,
+      height = 6
+    )
+  }
+```
+
+## [3.0.] Evaluate
+#### Reproduce the original 'victim_acted' 
+#### evaluate with tp = "cases_relative"
+```{r}
+tab_all <- tab %>%
+  tidyr::pivot_longer(
+      cols = tidyselect::contains("_"),
+      names_to = "cases_type",
+      values_to = "value"
+    ) %>%
+  dplyr::mutate(
+      new_id = purrr::pmap_chr(
+        .l = base::list(id,cases_type),
+        .f = function(id,tp){
+          suf = stringr::str_replace(tp,".*_(.{3}).*","\\1")
+          return(
+            base::paste(id,suf,sep = "_")
+          )
+        }
+      )
+    ) %>%
+  dplyr::select(-id,-cases_type) %>%
+  tidyr::pivot_wider(
+      names_from = "new_id",
+      values_from = "value"
+    ) %>%
+  dplyr::filter(year == 2022)
+
+tab_all %>%
+  dplyr::mutate(
+    victim_disengaged = (
+      all_cases_abs*(
+          A_unsure_rel + A_fear_colleagues_rel + A_fear_leadership_rel +
+          A_fear_job_rel + A_no_difference_rel
+        )/100
+      ),
+    victim_acted_all = (
+      all_cases_abs*(
+          B_discuss_HR_rel + B_discuss_AmrTr_rel + B_discuss_leadership_rel +
+          B_discuss_colleagues_rel + B_stop_rel
+        )/100
+      ),
+    other = (
+      all_cases_abs*(
+          C_other_rel + C_no_answer_rel + unserious_rel
+      )/100
+    ),
+    victim_acted_new = victim_acted_all*(all_cases_abs/(victim_disengaged + victim_acted_all)) - other
+  ) %>%
+  dplyr::select(victim_acted_abs,victim_acted_new)
+```
+
+## [3.1.] Calculate normalized 'victim_acted' parameter
+```{r}
+tab_norm <- tab_all %>%
+  dplyr::mutate(
+      all_cases_norm = all_cases_abs - ((unserious_rel/100)*all_cases_abs),
+      victim_disengaged = (
+        all_cases_norm*(
+            A_unsure_rel + A_fear_colleagues_rel + A_fear_leadership_rel +
+            A_fear_job_rel + A_no_difference_rel
+          )/100
+        ),
+      victim_acted_all = (
+        all_cases_norm*(
+            B_discuss_HR_rel + B_discuss_AmrTr_rel + B_discuss_leadership_rel +
+            B_discuss_colleagues_rel + B_stop_rel
+          )/100
+        ),
+      other = (
+        all_cases_norm*(
+            C_other_rel + C_no_answer_rel
+        )/100
+      ),
+      victim_acted_new = victim_acted_all*(
+          all_cases_norm/(victim_disengaged + victim_acted_all)
+        ) - other
+    ) %>%
+  dplyr::select(
+      institute, year, resolved = resolved_abs,
+      all_cases_abs,  all_cases_norm,
+      victim_acted = victim_acted_new
+    ) %>%
+  dplyr::mutate(
+      year = base::factor(
+          x = year,
+          levels = ys,
+          ordered = TRUE
+        ),
+      institute = base::factor(
+        x = institute,
+        levels = base::c("KU",levs),
+        ordered = TRUE
+      )
+    )
+```
+
+## [3.2.] Combine data from all 3 years
+```{r}
+tab_comb <- tab_wide %>%
+  dplyr::filter(
+      year != 2022
+    ) %>% 
+  dplyr::select(
+      institute, year, resolved,
+      all_cases_abs = all_cases, victim_acted
+    ) %>%
+  dplyr::mutate(
+      all_cases_norm = NA
+    ) %>% 
+  dplyr::bind_rows(.,tab_norm)
+```
+
+
+## [3.3.] Calculate relative amount of resolved cases
+```{r}
+tab_resolv <- tab_comb %>%
+  dplyr::mutate(
+      all_resolved_rel = 100*(resolved/all_cases_abs),
+      vic_resolved_rel = 100*(resolved/victim_acted)
+    )
+
+std_res <- tab_resolv %>%
+  dplyr::filter(
+      year == "2022" &
+      institute == "KU"
+    ) %>%
+  dplyr::pull(all_resolved_rel)
+```
+
+## [3.4.] Plot 'resolved' instances
+```{r}
+ggplot2::ggplot(
+      data = tab_resolv,
+      mapping = aes(
+        y = year,
+        x = all_resolved_rel,
+        fill = year
+      )
+    ) +
+  geom_bar(
+      stat = "identity",
+      colour = "black"
+    ) +
+  geom_text(
+      mapping = aes(
+          label = resolved
+        ),
+      hjust = -0.25,
+      size = 3
+    ) +
+  geom_vline(
+      xintercept = std_res,
+      linetype = "dashed"
+    ) +
+  scale_y_discrete(
+      position = "right"
+    ) +
+  scale_x_continuous(
+      limits = base::c(0,60)
+    ) +
+  scale_fill_manual(
+      limits = ys,
+      breaks = ys,
+      values = base::c("white","grey50","black")
+    ) +
+  facet_wrap(
+      facets = . ~ institute,
+      ncol = 1,
+      strip.position = "left"
+    ) +
+  theme_bw() +
+  theme(
+      panel.spacing = grid::unit(0.1,"lines"),
+      aspect.ratio = 1/3,
+      axis.title = element_blank(),
+      legend.position = "none"
+    )
+```
+
+## [3.5.] Print plot
+```{r}
+for(ext in base::c("pdf", "png")){
+    ggplot2::ggsave(
+      filename = base::paste0(
+          here::here("results/"),
+          base::format(base::Sys.time(), "%Y%m%d"),
+          "_resolvedInstancesRatio",
+          ".", ext
+        ),
+      plot = ggplot2::last_plot(),
+      device = ext,
+      dpi = 300,
+      width = 3,
+      height = 6
+    )
+  }
+```
+
+## [4.0.] Derive KU-average value for 'vic_resolved_rel' parameter
+```{r}
+std_res_rel <- tab_resolv %>%
+  dplyr::filter(
+      year == "2022" &
+      institute == "KU"
+    ) %>%
+  dplyr::pull(vic_resolved_rel)
+```
+
+## [4.1.] Calculate relative amount of resolved cases
+```{r}
+ggplot2::ggplot(
+      data = tab_resolv,
+      mapping = aes(
+        y = year,
+        x = vic_resolved_rel,
+        fill = year
+      )
+    ) +
+  geom_bar(
+      stat = "identity",
+      colour = "black"
+    ) +
+  geom_text(
+      mapping = aes(
+          label = base::round(victim_acted,digits = 2)
+        ),
+      hjust = -0.25,
+      size = 3
+    ) +
+  geom_vline(
+      xintercept = std_res_rel,
+      linetype = "dashed"
+    ) +
+  scale_y_discrete(
+      position = "right"
+    ) +
+  scale_x_continuous(
+      limits = base::c(0,160)
+    ) +
+  scale_fill_manual(
+      limits = ys,
+      breaks = ys,
+      values = base::c("white","grey50","black")
+    ) +
+  facet_wrap(
+      facets = . ~ institute,
+      ncol = 1,
+      strip.position = "left"
+    ) +
+  theme_bw() +
+  theme(
+      panel.spacing = grid::unit(0.1,"lines"),
+      aspect.ratio = 1/3,
+      axis.title = element_blank(),
+      legend.position = "none"
+    )
+```
+
+## [4.2.] Print plot
+```{r}
+for(ext in base::c("pdf", "png")){
+    ggplot2::ggsave(
+      filename = base::paste0(
+          here::here("results/"),
+          base::format(base::Sys.time(), "%Y%m%d"),
+          "_normResolvedInstancesRatio",
+          ".", ext
+        ),
+      plot = ggplot2::last_plot(),
+      device = ext,
+      dpi = 300,
+      width = 3,
+      height = 6
+    )
+  }
+```
